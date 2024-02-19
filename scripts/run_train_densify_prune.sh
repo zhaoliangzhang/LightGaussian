@@ -15,15 +15,7 @@ port=6035
 
 # Only one dataset specified here
 declare -a run_args=(
-    "bicycle"
-    # "bonsai"
-    # "counter"
-    # "kitchen"
-    # "room"
-    # "stump"
-    # "garden"
-    # "train"
-    # "truck"
+    "/data/zhaoliang_data/aaviss-challenge1/t01_v01_s00_r03_ImageDensity/docker_output"
   )
 
 # prune percentage for the first prune
@@ -63,14 +55,14 @@ for arg in "${run_args[@]}"; do
         if [[ -n $gpu_id ]]; then
           echo "GPU $gpu_id is available. Starting train_densify_prune.py with dataset '$arg', prune_percent '$prune_percent', prune_type '$prune_type', prune_decay '$prune_decay', and v_pow '$vp' on port $port"
           CUDA_VISIBLE_DEVICES=$gpu_id nohup python train_densify_prune.py \
-            -s "PATH/TO/DATASET/$arg" \
-            -m "OUTPUT/PATH/${arg}" \
+            -s "/data/zhaoliang_data/aaviss-challenge1/t01_v01_s00_r03_ImageDensity/docker_output" \
+            -m "output" \
             --prune_percent $prune_percent \
             --prune_decay $prune_decay \
             --prune_iterations 20000 \
             --v_pow $vp\
             --eval \
-            --port $port > "logs/train_${arg}.log" 2>&1 &
+            --port $port > "logs/train.log" 2>&1 &
           # you need to create the log folder first
           # Increment the port number for the next run
           ((port++))

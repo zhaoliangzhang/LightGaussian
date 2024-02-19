@@ -12,18 +12,6 @@
 <img src="https://lightgaussian.github.io/static/images/teaser.png" height="250"/>
 </div>
 
-## User Guidance
-#### Gaussian Prune Ratio, Vector Quantization Ratio vs. FPS, SSIM
-<div>
-<img src="https://raw.githubusercontent.com/VITA-Group/LightGaussian/main/static/prune_ratio_vs_ssim.svg" height="250"/>
-</div>
-
-#### Mild Compression Ratio, with Minimum Accuracy Degradation
-<div>
-<img src="https://github.com/VITA-Group/LightGaussian/blob/main/static/table5.png?raw=true" height="300"/>
-</div>
-
-
 ## Setup
 #### Local Setup
 The codebase is based on [gaussian-splatting](https://github.com/graphdeco-inria/gaussian-splatting)

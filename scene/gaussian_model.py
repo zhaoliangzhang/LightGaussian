@@ -742,7 +742,7 @@ class GaussianModel:
         self.densify_and_split(grads, max_grad, extent)
         torch.cuda.empty_cache()
 
-    def densify_and_prune(self, max_grad, min_opacity, extent, max_screen_size):
+    def densify_and_prune(self, max_grad, min_opacity, extent, max_screen_size, iteration):
         grads = self.xyz_gradient_accum / self.denom
         grads[grads.isnan()] = 0.0
 
@@ -756,7 +756,8 @@ class GaussianModel:
             prune_mask = torch.logical_or(
                 torch.logical_or(prune_mask, big_points_vs), big_points_ws
             )
-        self.prune_points(prune_mask)
+        if(iteration > 101):
+            self.prune_points(prune_mask)
 
         torch.cuda.empty_cache()
 

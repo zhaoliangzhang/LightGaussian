@@ -5,22 +5,31 @@
 # For inquiries contact george.drettakis@inria.fr
 #
 import os
+import json
+import yaml
 import torch
+import torchvision.transforms.functional as tf
+import subprocess as sp
 from random import randint
 from utils.loss_utils import l1_loss, ssim
 from gaussian_renderer import render, network_gui
 import sys
 from lpipsPyTorch import lpips
+import torch.utils.benchmark as benchmark
+from PIL import Image
+from pathlib import Path
+import hashlib
+import time
 
 from scene import Scene, GaussianModel
 from utils.general_utils import safe_state
-from utils.logger_utils import training_report, prepare_output_and_logger
+from utils.logger_utils import prepare_output_and_logger
 
 import uuid
 from tqdm import tqdm
 from utils.image_utils import psnr
 from argparse import ArgumentParser, Namespace
-from arguments import ModelParams, PipelineParams, OptimizationParams
+from arguments import ModelParams, PipelineParams, OptimizationParams, PruneParams
 
 # from prune_train import prepare_output_and_logger, training_report
 from icecream import ic
@@ -29,21 +38,33 @@ from prune import prune_list, calculate_v_imp_score
 import torchvision
 from torch.optim.lr_scheduler import ExponentialLR
 import csv
+from collections import defaultdict
 import numpy as np
-
 
 try:
     from torch.utils.tensorboard import SummaryWriter
-
     TENSORBOARD_FOUND = True
 except ImportError:
     TENSORBOARD_FOUND = False
 
+try:
+    import wandb
+    WANDB_FOUND = True
+except ImportError:
+    WANDB_FOUND = False
+
+
+def get_gpu_memory():
+    command = "nvidia-smi --query-gpu=memory.used --format=csv"
+    memory_used_info = sp.check_output(command.split()).decode('ascii').split('\n')[:-1][1:]
+    memory_used_values = [int(x.split()[0]) for i, x in enumerate(memory_used_info)]
+    return memory_used_values
 
 def training(
     dataset,
     opt,
     pipe,
+    prune,
     testing_iterations,
     saving_iterations,
     checkpoint_iterations,
@@ -53,6 +74,7 @@ def training(
 ):
     first_iter = 0
     tb_writer = prepare_output_and_logger(dataset)
+    wandb_enabled = WANDB_FOUND and args.use_wandb
     gaussians = GaussianModel(dataset.sh_degree)
     scene = Scene(dataset, gaussians)
     gaussians.training_setup(opt)
@@ -71,6 +93,8 @@ def training(
     progress_bar = tqdm(range(first_iter, opt.iterations), desc="Training progress")
     first_iter += 1
     gaussians.scheduler = ExponentialLR(gaussians.optimizer, gamma=0.97)
+
+    net_training_time = 0
     for iteration in range(first_iter, opt.iterations + 1):
         if network_gui.conn == None:
             network_gui.try_connect()
@@ -153,18 +177,21 @@ def training(
             if iteration in saving_iterations:
                 print("\n[ITER {}] Saving Gaussians".format(iteration))
                 scene.save(iteration)
-            training_report(
-                tb_writer,
-                iteration,
-                Ll1,
-                loss,
-                l1_loss,
-                iter_start.elapsed_time(iter_end),
-                testing_iterations,
-                scene,
-                render,
-                (pipe, background),
-            )
+            iter_time = iter_start.elapsed_time(iter_end)
+            net_training_time += iter_time
+            training_report(wandb_enabled, iteration, Ll1, loss, 
+            iter_time, net_training_time, scene)
+
+            # if (iteration -1)% dataset.log_interval == 0 or iteration == opt.iterations:
+            #     log_dict = {
+            #                 "Loss": f"{ema_loss_for_log:.{5}f}",
+            #                 "Num points": f"{gaussians._xyz.shape[0]}",
+            #                 "PSNR": f"{cur_psnr:.{2}f}",
+            #                 }
+            #     progress_bar.set_postfix(log_dict)
+            #     progress_bar.update(dataset.log_interval)
+            # if iteration == opt.iterations:
+            #     progress_bar.close()
 
             # Densification
             if iteration < opt.densify_until_iter:
@@ -188,6 +215,7 @@ def training(
                         0.005,
                         scene.cameras_extent,
                         size_threshold,
+                        iteration,
                     )
 
                 if iteration % opt.opacity_reset_interval == 0 or (
@@ -195,13 +223,13 @@ def training(
                 ):
                     gaussians.reset_opacity()
 
-            if iteration in args.prune_iterations:
+            if iteration in prune.prune_iterations:
                 # TODO Add prunning types
                 gaussian_list, imp_list = prune_list(gaussians, scene, pipe, background)
-                i = args.prune_iterations.index(iteration)
-                v_list = calculate_v_imp_score(gaussians, imp_list, args.v_pow)
+                i = prune.prune_iterations.index(iteration)
+                v_list = calculate_v_imp_score(gaussians, imp_list, prune.v_pow)
                 gaussians.prune_gaussians(
-                    (args.prune_decay**i) * args.prune_percent, v_list
+                    (prune.prune_decay**i) * prune.prune_percent, v_list
                 )
 
 
@@ -224,17 +252,211 @@ def training(
                     v_list = calculate_v_imp_score(gaussians, imp_list, args.v_pow)
                     np.savez(os.path.join(scene.model_path,"imp_score"), v_list.cpu().detach().numpy()) 
 
+    if wandb_enabled:
+        wandb.run.summary['training_time'] = net_training_time/1000
+
+    return net_training_time/1000
+
+def training_report(wandb_enabled, iteration, Ll1, loss, 
+                    iter_time, elapsed, scene : Scene):
+
+    if wandb_enabled:
+        wandb.log({"train_loss_patches/l1_loss": Ll1.item(), 
+                   "train_loss_patches/total_loss": loss.item(), 
+                   "num_points": scene.gaussians.get_xyz.shape[0],
+                   "iter_time": iter_time,
+                   "elapsed": elapsed,
+                   }, step=iteration)
+
+def render_set(model_path, name, iteration, views, gaussians, pipeline, background):
+    render_path = os.path.join(model_path, name, "ours_{}".format(iteration), "renders")
+    gts_path = os.path.join(model_path, name, "ours_{}".format(iteration), "gt")
+
+    makedirs(render_path, exist_ok=True)
+    makedirs(gts_path, exist_ok=True)
+
+    for idx, view in enumerate(tqdm(views, desc="Rendering progress")):
+        rendering = render(view, gaussians, pipeline, background)["render"]
+        gt = view.original_image[0:3, :, :]
+        torchvision.utils.save_image(rendering, os.path.join(render_path, '{0:05d}'.format(idx) + ".png"))
+        torchvision.utils.save_image(gt, os.path.join(gts_path, '{0:05d}'.format(idx) + ".png"))
+
+def render_sets(
+    dataset: ModelParams,
+    iteration: int,
+    pipeline: PipelineParams,
+    skip_train: bool,
+    skip_test: bool,
+    load_vq: bool, 
+):
+    with torch.no_grad():
+        gaussians = GaussianModel(dataset.sh_degree)
+        scene = Scene(dataset, gaussians, load_iteration=iteration, shuffle=False, load_vq= load_vq)
+        bg_color = [1, 1, 1] if dataset.white_background else [0, 0, 0]
+        background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
+
+        if not skip_train:
+            render_set(
+                dataset.model_path,
+                "train",
+                scene.loaded_iter,
+                scene.getTrainCameras(),
+                gaussians,
+                pipeline,
+                background,
+            )
+
+        if not skip_test:
+            render_set(
+                dataset.model_path,
+                "test",
+                scene.loaded_iter,
+                scene.getTestCameras(),
+                gaussians,
+                pipeline,
+                background,
+            )
+        fps = measure_fps(scene, gaussians, pipeline, background, False)
+        wandb.log({"FPS": fps})
+
+def render_fn(views, gaussians, pipeline, background, use_amp):
+    with torch.autocast(device_type='cuda', dtype=torch.float16, enabled=use_amp):
+        for view in views:
+            render(view, gaussians, pipeline, background)
+
+def measure_fps(scene, gaussians, pipeline, background, use_amp):
+    with torch.no_grad():
+        views = scene.getTrainCameras() + scene.getTestCameras()
+        t0 = benchmark.Timer(stmt='render_fn(views, gaussians, pipeline, background, use_amp)',
+                            setup='from __main__ import render_fn',
+                            globals={'views': views, 'gaussians': gaussians, 'pipeline': pipeline, 
+                                     'background': background, 'use_amp': use_amp},
+                            )
+        render_time = t0.timeit(50)
+        fps = len(views)/render_time.median
+    return fps
+        
+
+
+def readImages(renders_dir, gt_dir):
+    renders = []
+    gts = []
+    image_names = []
+    for fname in os.listdir(renders_dir):
+        render = Image.open(renders_dir / fname)
+        gt = Image.open(gt_dir / fname)
+        renders.append(tf.to_tensor(render).unsqueeze(0)[:, :3, :, :].cuda())
+        gts.append(tf.to_tensor(gt).unsqueeze(0)[:, :3, :, :].cuda())
+        image_names.append(fname)
+    return renders, gts, image_names
+
+
+def evaluate(model_paths):
+    full_dict = {}
+    per_view_dict = {}
+    full_dict_polytopeonly = {}
+    per_view_dict_polytopeonly = {}
+    print("")
+
+    for scene_dir in model_paths:
+        try:
+            print("Scene:", scene_dir)
+            full_dict[scene_dir] = {}
+            per_view_dict[scene_dir] = {}
+            full_dict_polytopeonly[scene_dir] = {}
+            per_view_dict_polytopeonly[scene_dir] = {}
+
+            test_dir = Path(scene_dir) / "test"
+
+            for method in os.listdir(test_dir):
+                print("Method:", method)
+
+                full_dict[scene_dir][method] = {}
+                per_view_dict[scene_dir][method] = {}
+                full_dict_polytopeonly[scene_dir][method] = {}
+                per_view_dict_polytopeonly[scene_dir][method] = {}
+
+                method_dir = test_dir / method
+                gt_dir = method_dir / "gt"
+                renders_dir = method_dir / "renders"
+                renders, gts, image_names = readImages(renders_dir, gt_dir)
+
+                ssims = []
+                psnrs = []
+                lpipss = []
+
+                for idx in tqdm(range(len(renders)), desc="Metric evaluation progress"):
+                    ssims.append(ssim(renders[idx], gts[idx]))
+                    psnrs.append(psnr(renders[idx], gts[idx]))
+                    lpipss.append(lpips(renders[idx], gts[idx], net_type="vgg"))
+
+                wandb.log({"SSIM": torch.tensor(ssims).mean(),
+                           "PSNR": torch.tensor(psnrs).mean(),
+                           "LPIPS": torch.tensor(lpipss).mean()})
+                print("  SSIM : {:>12.7f}".format(torch.tensor(ssims).mean(), ".5"))
+                print("  PSNR : {:>12.7f}".format(torch.tensor(psnrs).mean(), ".5"))
+                print("  LPIPS: {:>12.7f}".format(torch.tensor(lpipss).mean(), ".5"))
+                print("")
+
+                full_dict[scene_dir][method].update(
+                    {
+                        "SSIM": torch.tensor(ssims).mean().item(),
+                        "PSNR": torch.tensor(psnrs).mean().item(),
+                        "LPIPS": torch.tensor(lpipss).mean().item(),
+                    }
+                )
+                per_view_dict[scene_dir][method].update(
+                    {
+                        "SSIM": {
+                            name: ssim
+                            for ssim, name in zip(
+                                torch.tensor(ssims).tolist(), image_names
+                            )
+                        },
+                        "PSNR": {
+                            name: psnr
+                            for psnr, name in zip(
+                                torch.tensor(psnrs).tolist(), image_names
+                            )
+                        },
+                        "LPIPS": {
+                            name: lp
+                            for lp, name in zip(
+                                torch.tensor(lpipss).tolist(), image_names
+                            )
+                        },
+                    }
+                )
+
+            with open(scene_dir + "/results.json", "w") as fp:
+                json.dump(full_dict[scene_dir], fp, indent=True)
+            with open(scene_dir + "/per_view.json", "w") as fp:
+                json.dump(per_view_dict[scene_dir], fp, indent=True)
+        except:
+            print("Unable to compute metrics for model", scene_dir)
 
 if __name__ == "__main__":
+    # Set up config file
+    config_path = sys.argv[sys.argv.index("--config")+1] if "--config" in sys.argv else None
+    if config_path:
+        with open(config_path) as f:
+            config = yaml.load(f, Loader=yaml.FullLoader)
+    else:
+        config = {}
+    config = defaultdict(lambda: {}, config)
     # Set up command line argument parser
     parser = ArgumentParser(description="Training script parameters")
-    lp = ModelParams(parser)
-    op = OptimizationParams(parser)
-    pp = PipelineParams(parser)
+    lp = ModelParams(parser, config['model_params'])
+    op = OptimizationParams(parser, config['opt_params'])
+    pp = PipelineParams(parser, config['pipe_params'])
+    prunp = PruneParams(parser, config['prune_params'])
+    parser.add_argument('--config', type=str, default=None)
     parser.add_argument("--ip", type=str, default="127.0.0.1")
-    parser.add_argument("--port", type=int, default=6009)
+    parser.add_argument("--port", type=int, default=6015)
     parser.add_argument("--debug_from", type=int, default=-1)
     parser.add_argument("--detect_anomaly", action="store_true", default=False)
+    parser.add_argument("--skip_train", action="store_true")
+    parser.add_argument("--skip_test", action="store_true")
     parser.add_argument(
         "--test_iterations",
         nargs="+",
@@ -242,7 +464,7 @@ if __name__ == "__main__":
         default=[7_000, 30_000],
     )
     parser.add_argument(
-        "--save_iterations", nargs="+", type=int, default=[7_000, 30_000]
+        "--save_iterations", nargs="+", type=int, default=[7_000, 30_000, 35_000]
     )
     parser.add_argument("--quiet", action="store_true")
     parser.add_argument(
@@ -250,12 +472,6 @@ if __name__ == "__main__":
     )
     parser.add_argument("--start_checkpoint", type=str, default=None)
 
-    parser.add_argument(
-        "--prune_iterations", nargs="+", type=int, default=[16_000, 24_000]
-    )
-    parser.add_argument("--prune_percent", type=float, default=0.5)
-    parser.add_argument("--v_pow", type=float, default=0.1)
-    parser.add_argument("--prune_decay", type=float, default=0.8)
     args = parser.parse_args(sys.argv[1:])
     args.save_iterations.append(args.iterations)
 
@@ -265,10 +481,31 @@ if __name__ == "__main__":
     # Start GUI server, configure and run training
     network_gui.init(args.ip, args.port)
     torch.autograd.set_detect_anomaly(args.detect_anomaly)
-    training(
-        lp.extract(args),
-        op.extract(args),
-        pp.extract(args),
+    lp_args = lp.extract(args)
+    op_args = op.extract(args)
+    pp_args = pp.extract(args)
+    prunp_args = prunp.extract(args)
+    
+    # Prepare logger
+    wandb_enabled=(WANDB_FOUND and lp_args.use_wandb)
+    id = hashlib.md5(lp_args.wandb_run_name.encode('utf-8')).hexdigest()
+    wandb.init(
+        project=lp_args.wandb_project,
+        name=lp_args.wandb_run_name,
+        entity=lp_args.wandb_entity,
+        config=args,
+        sync_tensorboard=False,
+        dir=lp_args.model_path,
+        mode=lp_args.wandb_mode,
+        id=id,
+        resume=True
+    )
+
+    training_time = training(
+        lp_args,
+        op_args,
+        pp_args,
+        prunp_args,
         args.test_iterations,
         args.save_iterations,
         args.checkpoint_iterations,
@@ -276,6 +513,19 @@ if __name__ == "__main__":
         args.debug_from,
         args,
     )
+
+    full_dict = {args.model_path: {}}
+    full_dict[args.model_path].update({"Training time": training_time})
+    with open(os.path.join(args.model_path,"results_training.json"), 'w') as fp:
+        json.dump(full_dict[args.model_path], fp, indent=True)
+
+    if not args.skip_test:
+        if os.path.exists(os.path.join(args.model_path,"results.json")) and not args.retest:
+            print("Testing complete at {}".format(args.model_path))
+        else:
+            render_sets(lp_args, op_args.iterations, pp_args, args.skip_train, args.skip_test, False)
+    
+    evaluate([lp_args.model_path])
 
     # All done
     print("\nTraining complete.")
