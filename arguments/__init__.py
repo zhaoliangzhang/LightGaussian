@@ -70,6 +70,7 @@ class ModelParams(ParamGroup):
         self.wandb_project = "lightgaussian"
         self.wandb_entity = "zhaoliangzhang"
         self.wandb_run_name = "test-run"
+        self.wandb_group = "baseline"
         self.wandb_mode = "online"
         self.wandb_log_images = False
         self.wandb_tags = ""
@@ -100,6 +101,7 @@ class OptimizationParams(ParamGroup):
         self.position_lr_max_steps = 30_000
         self.feature_lr = 0.0025
         self.opacity_lr = 0.05
+        self.mask_lr = 0.05
         self.scaling_lr = 0.005
         self.rotation_lr = 0.001
         self.percent_dense = 0.01
@@ -118,6 +120,7 @@ class PruneParams(ParamGroup):
         self.prune_percent = 0.5
         self.v_pow = 0.1
         self.prune_decay = 0.8
+        self.use_mask = False
         super().__init__(parser, config, "Prune Parameters")
 
 def get_combined_args(parser: ArgumentParser):

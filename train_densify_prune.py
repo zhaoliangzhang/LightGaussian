@@ -19,13 +19,11 @@ import torch.utils.benchmark as benchmark
 from PIL import Image
 from pathlib import Path
 import hashlib
-import time
 
 from scene import Scene, GaussianModel
 from utils.general_utils import safe_state
 from utils.logger_utils import prepare_output_and_logger
 
-import uuid
 from tqdm import tqdm
 from utils.image_utils import psnr
 from argparse import ArgumentParser, Namespace
@@ -37,7 +35,6 @@ from os import makedirs
 from prune import prune_list, calculate_v_imp_score
 import torchvision
 from torch.optim.lr_scheduler import ExponentialLR
-import csv
 from collections import defaultdict
 import numpy as np
 
@@ -75,7 +72,7 @@ def training(
     first_iter = 0
     tb_writer = prepare_output_and_logger(dataset)
     wandb_enabled = WANDB_FOUND and args.use_wandb
-    gaussians = GaussianModel(dataset.sh_degree)
+    gaussians = GaussianModel(dataset.sh_degree, prune.use_mask)
     scene = Scene(dataset, gaussians)
     gaussians.training_setup(opt)
     if checkpoint:
@@ -146,7 +143,9 @@ def training(
         # Render
         if (iteration - 1) == debug_from:
             pipe.debug = True
-        render_pkg = render(viewpoint_cam, gaussians, pipe, background)
+        if iteration == opt.densify_until_iter+1:
+            gaussians.set_trainable_mask(opt)
+        render_pkg = render(viewpoint_cam, gaussians, pipe, background, (iteration>opt.densify_until_iter) and prune.use_mask)
         image, viewspace_point_tensor, visibility_filter, radii = (
             render_pkg["render"],
             render_pkg["viewspace_points"],
@@ -179,19 +178,13 @@ def training(
                 scene.save(iteration)
             iter_time = iter_start.elapsed_time(iter_end)
             net_training_time += iter_time
+            if prune.use_mask:
+                log_mask = torch.nn.Threshold(0.5, 0)(gaussians.get_mask)
+                sparsity = 1 - torch.count_nonzero(log_mask).cpu().detach().numpy()/torch.numel(log_mask)
+            else:
+                sparsity = None
             training_report(wandb_enabled, iteration, Ll1, loss, 
-            iter_time, net_training_time, scene)
-
-            # if (iteration -1)% dataset.log_interval == 0 or iteration == opt.iterations:
-            #     log_dict = {
-            #                 "Loss": f"{ema_loss_for_log:.{5}f}",
-            #                 "Num points": f"{gaussians._xyz.shape[0]}",
-            #                 "PSNR": f"{cur_psnr:.{2}f}",
-            #                 }
-            #     progress_bar.set_postfix(log_dict)
-            #     progress_bar.update(dataset.log_interval)
-            # if iteration == opt.iterations:
-            #     progress_bar.close()
+            iter_time, net_training_time, scene, sparsity)
 
             # Densification
             if iteration < opt.densify_until_iter:
@@ -255,10 +248,15 @@ def training(
     if wandb_enabled:
         wandb.run.summary['training_time'] = net_training_time/1000
 
+    if prune.use_mask:
+        prune_mask = gaussians.get_mask < 0.5
+        gaussians.prune_points(prune_mask.squeeze())
+        wandb.log({"final_num_points": gaussians.get_xyz.shape[0]})
+
     return net_training_time/1000
 
 def training_report(wandb_enabled, iteration, Ll1, loss, 
-                    iter_time, elapsed, scene : Scene):
+                    iter_time, elapsed, scene : Scene, sparsity):
 
     if wandb_enabled:
         wandb.log({"train_loss_patches/l1_loss": Ll1.item(), 
@@ -267,6 +265,9 @@ def training_report(wandb_enabled, iteration, Ll1, loss,
                    "iter_time": iter_time,
                    "elapsed": elapsed,
                    }, step=iteration)
+        if sparsity != None:
+            wandb.log({"sparsity": sparsity,
+                       }, step = iteration)
 
 def render_set(model_path, name, iteration, views, gaussians, pipeline, background):
     render_path = os.path.join(model_path, name, "ours_{}".format(iteration), "renders")
@@ -452,7 +453,7 @@ if __name__ == "__main__":
     prunp = PruneParams(parser, config['prune_params'])
     parser.add_argument('--config', type=str, default=None)
     parser.add_argument("--ip", type=str, default="127.0.0.1")
-    parser.add_argument("--port", type=int, default=6015)
+    parser.add_argument("--port", type=int, default=6012)
     parser.add_argument("--debug_from", type=int, default=-1)
     parser.add_argument("--detect_anomaly", action="store_true", default=False)
     parser.add_argument("--skip_train", action="store_true")
@@ -493,6 +494,7 @@ if __name__ == "__main__":
         project=lp_args.wandb_project,
         name=lp_args.wandb_run_name,
         entity=lp_args.wandb_entity,
+        group=lp_args.wandb_group,
         config=args,
         sync_tensorboard=False,
         dir=lp_args.model_path,

@@ -40,9 +40,11 @@ class GaussianModel:
         self.opacity_activation = torch.sigmoid
         self.inverse_opacity_activation = inverse_sigmoid
 
+        self.mask_activation = torch.sigmoid
+
         self.rotation_activation = torch.nn.functional.normalize
 
-    def __init__(self, sh_degree: int):
+    def __init__(self, sh_degree: int, use_mask=False):
         self.active_sh_degree = 0
         self.max_sh_degree = sh_degree
         self._xyz = torch.empty(0)
@@ -51,6 +53,11 @@ class GaussianModel:
         self._scaling = torch.empty(0)
         self._rotation = torch.empty(0)
         self._opacity = torch.empty(0)
+        if use_mask:
+            self._mask = torch.empty(0)
+        else:
+            self._mask = None
+        self.use_mask = use_mask
         self.max_radii2D = torch.empty(0)
         self.xyz_gradient_accum = torch.empty(0)  # empty or frezze
         self.denom = torch.empty(0)
@@ -116,6 +123,10 @@ class GaussianModel:
     @property
     def get_opacity(self):
         return self.opacity_activation(self._opacity)
+    
+    @property
+    def get_mask(self):
+        return self.mask_activation(self._mask)
 
     def get_covariance(self, scaling_modifier=1):
         return self.covariance_activation(
@@ -174,6 +185,8 @@ class GaussianModel:
         self._scaling = nn.Parameter(scales.requires_grad_(True))
         self._rotation = nn.Parameter(rots.requires_grad_(True))
         self._opacity = nn.Parameter(opacities.requires_grad_(True))
+        if self.use_mask:
+            self._mask = nn.Parameter(torch.ones(opacities.shape), requires_grad=True)
         self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device="cuda")
 
     def training_setup(self, training_args):
@@ -756,8 +769,7 @@ class GaussianModel:
             prune_mask = torch.logical_or(
                 torch.logical_or(prune_mask, big_points_vs), big_points_ws
             )
-        if(iteration > 101):
-            self.prune_points(prune_mask)
+        self.prune_points(prune_mask)
 
         torch.cuda.empty_cache()
 
@@ -773,6 +785,14 @@ class GaussianModel:
         self.prune_points(prune_mask)
 
         torch.cuda.empty_cache()
+    
+    def set_trainable_mask(self, training_args):
+        self._mask = nn.Parameter(torch.ones(self._opacity.shape, device="cuda"), requires_grad=True)
+        self.optimizer.add_param_group({
+                "params": [self._mask],
+                "lr": training_args.mask_lr,
+                "name": "mask",
+            })
 
     def prune_gaussians(self, percent, import_score: list):
         ic(import_score.shape)

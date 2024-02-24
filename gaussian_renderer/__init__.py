@@ -24,6 +24,7 @@ def render(
     pc: GaussianModel,
     pipe,
     bg_color: torch.Tensor,
+    use_mask=False,
     scaling_modifier=1.0,
     override_color=None,
 ):
@@ -69,7 +70,10 @@ def render(
 
     means3D = pc.get_xyz
     means2D = screenspace_points
-    opacity = pc.get_opacity
+    if use_mask:
+        opacity = pc.get_opacity * pc.get_mask
+    else:
+        opacity = pc.get_opacity
 
     # If precomputed 3d covariance is provided, use it. If not, then it will be computed from
     # scaling / rotation by the rasterizer.
