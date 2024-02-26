@@ -121,6 +121,7 @@ class PruneParams(ParamGroup):
         self.v_pow = 0.1
         self.prune_decay = 0.8
         self.use_mask = False
+        self.mask_activation = "sigmod"
         super().__init__(parser, config, "Prune Parameters")
 
 def get_combined_args(parser: ArgumentParser):

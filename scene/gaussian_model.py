@@ -20,12 +20,13 @@ from utils.sh_utils import RGB2SH
 from simple_knn._C import distCUDA2
 from utils.graphics_utils import BasicPointCloud
 from utils.general_utils import strip_symmetric, build_scaling_rotation
+from utils.prune_utils import _gumbel_sigmoid
 from icecream import ic
 from vectree.utils import load_vqgaussian, write_ply_data
 
 
 class GaussianModel:
-    def setup_functions(self):
+    def setup_functions(self, prune):
         def build_covariance_from_scaling_rotation(scaling, scaling_modifier, rotation):
             L = build_scaling_rotation(scaling_modifier * scaling, rotation)
             actual_covariance = L @ L.transpose(1, 2)
@@ -40,11 +41,14 @@ class GaussianModel:
         self.opacity_activation = torch.sigmoid
         self.inverse_opacity_activation = inverse_sigmoid
 
-        self.mask_activation = torch.sigmoid
+        if prune.mask_activation == "sigmod":
+            self.mask_activation = torch.sigmoid
+        elif prune.mask_activation == "gumbel_sigmoid":
+            self.mask_activation = _gumbel_sigmoid
 
         self.rotation_activation = torch.nn.functional.normalize
 
-    def __init__(self, sh_degree: int, use_mask=False):
+    def __init__(self, sh_degree: int, prune):
         self.active_sh_degree = 0
         self.max_sh_degree = sh_degree
         self._xyz = torch.empty(0)
@@ -53,18 +57,18 @@ class GaussianModel:
         self._scaling = torch.empty(0)
         self._rotation = torch.empty(0)
         self._opacity = torch.empty(0)
-        if use_mask:
+        if prune.use_mask:
             self._mask = torch.empty(0)
         else:
             self._mask = None
-        self.use_mask = use_mask
+        self.use_mask = prune.use_mask
         self.max_radii2D = torch.empty(0)
         self.xyz_gradient_accum = torch.empty(0)  # empty or frezze
         self.denom = torch.empty(0)
         self.optimizer = None
         self.percent_dense = 0
         self.spatial_lr_scale = 0
-        self.setup_functions()
+        self.setup_functions(prune)
 
     def capture(self):
         return (
@@ -186,7 +190,7 @@ class GaussianModel:
         self._rotation = nn.Parameter(rots.requires_grad_(True))
         self._opacity = nn.Parameter(opacities.requires_grad_(True))
         if self.use_mask:
-            self._mask = nn.Parameter(torch.ones(opacities.shape), requires_grad=True)
+            self._mask = nn.Parameter(torch.ones(opacities.shape), requires_grad=True).cuda()
         self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device="cuda")
 
     def training_setup(self, training_args):

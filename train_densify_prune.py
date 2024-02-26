@@ -72,7 +72,7 @@ def training(
     first_iter = 0
     tb_writer = prepare_output_and_logger(dataset)
     wandb_enabled = WANDB_FOUND and args.use_wandb
-    gaussians = GaussianModel(dataset.sh_degree, prune.use_mask)
+    gaussians = GaussianModel(dataset.sh_degree, prune)
     scene = Scene(dataset, gaussians)
     gaussians.training_setup(opt)
     if checkpoint:
@@ -286,12 +286,13 @@ def render_sets(
     dataset: ModelParams,
     iteration: int,
     pipeline: PipelineParams,
+    prune: PruneParams,
     skip_train: bool,
     skip_test: bool,
     load_vq: bool, 
 ):
     with torch.no_grad():
-        gaussians = GaussianModel(dataset.sh_degree)
+        gaussians = GaussianModel(dataset.sh_degree, prune)
         scene = Scene(dataset, gaussians, load_iteration=iteration, shuffle=False, load_vq= load_vq)
         bg_color = [1, 1, 1] if dataset.white_background else [0, 0, 0]
         background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
@@ -525,7 +526,7 @@ if __name__ == "__main__":
         if os.path.exists(os.path.join(args.model_path,"results.json")) and not args.retest:
             print("Testing complete at {}".format(args.model_path))
         else:
-            render_sets(lp_args, op_args.iterations, pp_args, args.skip_train, args.skip_test, False)
+            render_sets(lp_args, op_args.iterations, pp_args, prunp_args, args.skip_train, args.skip_test, False)
     
     evaluate([lp_args.model_path])
 
