@@ -41,7 +41,7 @@ class GaussianModel:
         self.opacity_activation = torch.sigmoid
         self.inverse_opacity_activation = inverse_sigmoid
 
-        if prune.mask_activation == "sigmod":
+        if prune.mask_activation == "sigmoid":
             self.mask_activation = torch.sigmoid
         elif prune.mask_activation == "gumbel_sigmoid":
             self.mask_activation = _gumbel_sigmoid
@@ -608,6 +608,8 @@ class GaussianModel:
         self._features_dc = optimizable_tensors["f_dc"]
         self._features_rest = optimizable_tensors["f_rest"]
         self._opacity = optimizable_tensors["opacity"]
+        if self.use_mask and "mask" in optimizable_tensors.keys():
+            self._mask = optimizable_tensors["mask"]
         self._scaling = optimizable_tensors["scaling"]
         self._rotation = optimizable_tensors["rotation"]
 

@@ -1,5 +1,6 @@
 *.pyc
 .vscode
+configs
 myscripts
 output
 build
@@ -10,3 +11,4 @@ screenshots
 logs_train
 vectree/pruned_distilled
 vectree/output
+test.py

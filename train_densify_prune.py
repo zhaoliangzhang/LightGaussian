@@ -218,12 +218,17 @@ def training(
 
             if iteration in prune.prune_iterations:
                 # TODO Add prunning types
-                gaussian_list, imp_list = prune_list(gaussians, scene, pipe, background)
-                i = prune.prune_iterations.index(iteration)
-                v_list = calculate_v_imp_score(gaussians, imp_list, prune.v_pow)
-                gaussians.prune_gaussians(
-                    (prune.prune_decay**i) * prune.prune_percent, v_list
-                )
+                if prune.use_mask:
+                    print("prune using mask at ", iteration)
+                    prune_mask = gaussians.get_mask < 0.5
+                    gaussians.prune_points(prune_mask.squeeze())
+                else:
+                    gaussian_list, imp_list = prune_list(gaussians, scene, pipe, background)
+                    i = prune.prune_iterations.index(iteration)
+                    v_list = calculate_v_imp_score(gaussians, imp_list, prune.v_pow)
+                    gaussians.prune_gaussians(
+                        (prune.prune_decay**i) * prune.prune_percent, v_list
+                    )
 
 
 
@@ -248,10 +253,6 @@ def training(
     if wandb_enabled:
         wandb.run.summary['training_time'] = net_training_time/1000
 
-    if prune.use_mask:
-        prune_mask = gaussians.get_mask < 0.5
-        gaussians.prune_points(prune_mask.squeeze())
-        wandb.log({"final_num_points": gaussians.get_xyz.shape[0]})
 
     return net_training_time/1000
 
@@ -294,6 +295,7 @@ def render_sets(
     with torch.no_grad():
         gaussians = GaussianModel(dataset.sh_degree, prune)
         scene = Scene(dataset, gaussians, load_iteration=iteration, shuffle=False, load_vq= load_vq)
+        print("NUM POINTS:", gaussians.get_xyz.shape[0])
         bg_color = [1, 1, 1] if dataset.white_background else [0, 0, 0]
         background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
 
@@ -466,7 +468,7 @@ if __name__ == "__main__":
         default=[7_000, 30_000],
     )
     parser.add_argument(
-        "--save_iterations", nargs="+", type=int, default=[7_000, 30_000, 35_000]
+        "--save_iterations", nargs="+", type=int, default=[7_000, 30_000]
     )
     parser.add_argument("--quiet", action="store_true")
     parser.add_argument(
