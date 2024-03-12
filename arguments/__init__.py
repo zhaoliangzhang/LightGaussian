@@ -57,6 +57,7 @@ class ParamGroup:
 class ModelParams(ParamGroup):
     def __init__(self, parser, config, sentinel=False):
         self.sh_degree = 3
+        self.opacity_activation = "gumble_sigmoid"
         self._source_path = ""
         self._model_path = ""
         self._images = "images"

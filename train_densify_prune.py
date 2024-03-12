@@ -72,7 +72,7 @@ def training(
     first_iter = 0
     tb_writer = prepare_output_and_logger(dataset)
     wandb_enabled = WANDB_FOUND and args.use_wandb
-    gaussians = GaussianModel(dataset.sh_degree, prune)
+    gaussians = GaussianModel(dataset, prune)
     scene = Scene(dataset, gaussians)
     gaussians.training_setup(opt)
     if checkpoint:
@@ -293,7 +293,7 @@ def render_sets(
     load_vq: bool, 
 ):
     with torch.no_grad():
-        gaussians = GaussianModel(dataset.sh_degree, prune)
+        gaussians = GaussianModel(dataset, prune)
         scene = Scene(dataset, gaussians, load_iteration=iteration, shuffle=False, load_vq= load_vq)
         print("NUM POINTS:", gaussians.get_xyz.shape[0])
         bg_color = [1, 1, 1] if dataset.white_background else [0, 0, 0]
