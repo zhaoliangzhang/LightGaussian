@@ -68,7 +68,7 @@ class ModelParams(ParamGroup):
 
         self.use_wandb = True
         self.wandb_project = "lightgaussian"
-        self.wandb_entity = "zhaoliangzhang"
+        self.wandb_entity = "simonsong"
         self.wandb_run_name = "test-run"
         self.wandb_group = "baseline"
         self.wandb_mode = "online"

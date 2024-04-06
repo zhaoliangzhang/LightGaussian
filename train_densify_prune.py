@@ -7,6 +7,7 @@
 import os
 import json
 import yaml
+import math
 import torch
 import torchvision.transforms.functional as tf
 import subprocess as sp
@@ -92,6 +93,10 @@ def training(
     gaussians.scheduler = ExponentialLR(gaussians.optimizer, gamma=0.97)
 
     net_training_time = 0
+
+    densify_threshold_list = [0.0003, 0.0002, 0.0001, 0.0002, 0.0003]
+    densify_threshold = 0.0003
+    iter_div = opt.iterations + 1 / len(densify_threshold_list)
     for iteration in range(first_iter, opt.iterations + 1):
         if network_gui.conn == None:
             network_gui.try_connect()
@@ -183,10 +188,27 @@ def training(
                 sparsity = 1 - torch.count_nonzero(log_mask).cpu().detach().numpy()/torch.numel(log_mask)
             else:
                 sparsity = None
-            training_report(wandb_enabled, iteration, Ll1, loss, 
-            iter_time, net_training_time, scene, sparsity)
-
+            
             # Densification
+            # cur_densify_threshold_index= int((iteration - 1) / (opt.densify_until_iter / len(densify_threshold_list)))
+            # cur_densify_threshold_index = min(cur_densify_threshold_index, len(densify_threshold_list) - 1)
+            # densify_threshold = densify_threshold_list[cur_densify_threshold_index]
+                
+            # densify_threshold = 0.0003
+            warmup_steps = 2500
+            
+            if iteration % 100 == 0:
+                if warmup_steps and iteration < warmup_steps:
+                    warmup_percent_done = iteration / warmup_steps
+                    warmup_learning_rate = 0.0003 - 0.0002 * warmup_percent_done  #gradual warmup_lr
+                    densify_threshold = warmup_learning_rate
+                else:
+                    #learning_rate = np.sin(learning_rate)  #预热学习率结束后,学习率呈sin衰减
+                    densify_threshold = densify_threshold**0.999 #预热学习率结束后,学习率呈指数衰减(近似模拟指数衰减)
+
+            training_report(wandb_enabled, iteration, Ll1, loss, 
+                        iter_time,densify_threshold,  net_training_time, scene, sparsity)
+            
             if iteration < opt.densify_until_iter:
                 # Keep track of max radii in image-space for pruning
                 gaussians.max_radii2D[visibility_filter] = torch.max(
@@ -204,7 +226,7 @@ def training(
                         20 if iteration > opt.opacity_reset_interval else None
                     )
                     gaussians.densify_and_prune(
-                        opt.densify_grad_threshold,
+                        densify_threshold,
                         0.005,
                         scene.cameras_extent,
                         size_threshold,
@@ -256,13 +278,14 @@ def training(
     return net_training_time/1000
 
 def training_report(wandb_enabled, iteration, Ll1, loss, 
-                    iter_time, elapsed, scene : Scene, sparsity):
+                    iter_time, densify_threshold, elapsed, scene : Scene, sparsity):
 
     if wandb_enabled:
         wandb.log({"train_loss_patches/l1_loss": Ll1.item(), 
                    "train_loss_patches/total_loss": loss.item(), 
                    "num_points": scene.gaussians.get_xyz.shape[0],
                    "iter_time": iter_time,
+                   "densify_threshold": densify_threshold,
                    "elapsed": elapsed,
                    }, step=iteration)
         if sparsity != None:
@@ -479,8 +502,8 @@ if __name__ == "__main__":
     print("Optimizing " + args.model_path)
     # Initialize system state (RNG)
     safe_state(args.quiet)
-    # Start GUI server, configure and run training
-    network_gui.init(args.ip, args.port)
+    # # Start GUI server, configure and run training
+    # network_gui.init(args.ip, args.port)
     torch.autograd.set_detect_anomaly(args.detect_anomaly)
     lp_args = lp.extract(args)
     op_args = op.extract(args)
@@ -490,6 +513,8 @@ if __name__ == "__main__":
     # Prepare logger
     wandb_enabled=(WANDB_FOUND and lp_args.use_wandb)
     id = hashlib.md5(lp_args.wandb_run_name.encode('utf-8')).hexdigest()
+
+    
     wandb.init(
         project=lp_args.wandb_project,
         name=lp_args.wandb_run_name,
@@ -502,6 +527,10 @@ if __name__ == "__main__":
         id=id,
         resume=True
     )
+
+    # run_id = wandb.util.generate_id()
+    # os.environ["WANDB_RUN_ID"] = run_id
+    # os.environ["WANDB_DIR"] = "/tmp/wandb_tianchen"
 
     training_time = training(
         lp_args,
